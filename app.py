@@ -1,3 +1,8 @@
+# 1. SQLITE3 MONKEYPATCH (Required for ChromaDB on Streamlit Cloud)
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import streamlit as st
 import os
 import tempfile
@@ -5,9 +10,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_chroma import Chroma
-from langchain.chains.history_aware_retriever import create_history_aware_retriever
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
 
@@ -24,13 +28,10 @@ st.markdown("""
 # Sidebar for configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-    # Priority: Streamlit Secrets > Sidebar Input
     gemini_api_key = st.secrets.get("GOOGLE_API_KEY") if "GOOGLE_API_KEY" in st.secrets else None
     
     if not gemini_api_key:
         gemini_api_key = st.text_input("Enter your Google Gemini API Key:", type="password")
-    else:
-        st.success("API Key loaded from Secrets!")
 
     if gemini_api_key:
         os.environ["GOOGLE_API_KEY"] = gemini_api_key
@@ -45,7 +46,7 @@ with st.sidebar:
         3. **Chat** with AI using the context from your notes.
     """)
 
-# Initialize session state
+# Initialize session state for history
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vectorstore" not in st.session_state:
@@ -95,17 +96,17 @@ if prompt := st.chat_input("Ask something..."):
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Setup Modern RAG Chain
+        # Setup Modern RAG Chain (via Classic Paths)
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
         retriever = st.session_state.vectorstore.as_retriever()
 
-        # 1. Contextualize question (Chat History Aware)
+        # 1. Contextualize question
         contextualize_q_system_prompt = (
             "Given a chat history and the latest user question "
             "which might reference context in the chat history, "
             "formulate a standalone question which can be understood "
             "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
+            "just reformulate it if needed."
         )
         contextualize_q_prompt = ChatPromptTemplate.from_messages([
             ("system", contextualize_q_system_prompt),
@@ -142,4 +143,4 @@ if prompt := st.chat_input("Ask something..."):
                     AIMessage(content=response["answer"]),
                 ])
 
-st.sidebar.caption("v2.0 (Modern LCEL) | Built with Streamlit & LangChain")
+st.sidebar.caption("v2.5 (Cloud Optimized) | Built with Streamlit & LangChain Classic")
