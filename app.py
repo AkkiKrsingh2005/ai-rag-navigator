@@ -1,4 +1,16 @@
-# 1. SQLITE3 MONKEYPATCH (Required for ChromaDB on Streamlit Cloud)
+"""
+📝 AI RAG Navigator: Intelligent Study Companion
+Developed by: Ankit Kumar
+
+This application implements an enterprise-grade Retrieval-Augmented Generation (RAG) 
+workflow to transform PDF study materials into interactive conversations. 
+Leverages: LangChain v0.3, Google Gemini 1.5 Flash, and ChromaDB.
+"""
+
+# ---------------------------------------------------------
+# 1. ENVIRONMENT & BACKEND SETUP
+# ---------------------------------------------------------
+# SQLITE3 MONKEYPATCH: Required for ChromaDB compatibility on Streamlit Community Cloud
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
@@ -13,53 +25,72 @@ from langchain_chroma import Chroma
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, AIMessage
 
-# Set up page config
-st.set_page_config(page_title="Talk to Your Notes | AI-RAG", layout="wide", page_icon="📝")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="AI RAG Navigator | Intelligent Study", 
+    layout="wide", 
+    page_icon="📝"
+)
 
-# Header
-st.title("📝 AI Study Companion: Talk to Your Notes")
+# --- APP HEADER ---
+st.title("📝 AI Study Companion: RAG Navigator")
 st.markdown("""
-    Upload your PDFs and chat with them! This application uses **Retrieval-Augmented Generation (RAG)** 
-    to provide accurate answers based on your study materials.
+    **Transform static notes into interactive AI partners.** 
+    This system uses semantic retrieval to ensure high-accuracy answers based *only* on your uploaded materials.
 """)
 
-# Sidebar for configuration
+# ---------------------------------------------------------
+# 2. SIDEBAR & CONFIGURATION
+# ---------------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ System Configuration")
+    
+    # Securely handle API Keys (Priority: Secrets > User Input)
     gemini_api_key = st.secrets.get("GOOGLE_API_KEY") if "GOOGLE_API_KEY" in st.secrets else None
     
     if not gemini_api_key:
-        gemini_api_key = st.text_input("Enter your Google Gemini API Key:", type="password")
+        gemini_api_key = st.text_input("Enter Google Gemini API Key:", type="password")
 
     if gemini_api_key:
         os.environ["GOOGLE_API_KEY"] = gemini_api_key
     else:
-        st.warning("Please enter your API Key to continue.")
+        st.warning("⚠️ API Key required to activate internal LLM reasoning.")
     
     st.divider()
     st.markdown("""
-        ### How it works:
-        1. **Upload** your PDF documents.
-        2. **Process** documents into segments.
-        3. **Chat** with AI using the context from your notes.
+        ### 🚀 Workflow Status
+        1. **Ingestion**: Upload PDF documents.
+        2. **Vectorization**: Documents are chunked and embedded via Google Vector API.
+        3. **Inference**: Chat using context-aware retrieval.
     """)
+    st.divider()
+    st.caption("Built with LangChain v0.3 & Google Gemini 1.5 Flash")
 
-# Initialize session state for history
+# ---------------------------------------------------------
+# 3. STATE MANAGEMENT
+# ---------------------------------------------------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
-# File uploader
-uploaded_files = st.file_uploader("Choose your study materials (PDFs)", type="pdf", accept_multiple_files=True)
+# ---------------------------------------------------------
+# 4. DOCUMENT PROCESSING PIPELINE
+# ---------------------------------------------------------
+uploaded_files = st.file_uploader(
+    "Upload Study Materials (PDF)", 
+    type="pdf", 
+    accept_multiple_files=True
+)
 
 if uploaded_files and gemini_api_key:
-    if st.button("🚀 Process Documents"):
-        with st.spinner("Processing documents..."):
+    if st.button("🏗️ Build Knowledge Base"):
+        with st.spinner("Building vector index for semantic search..."):
             all_pages = []
             for uploaded_file in uploaded_files:
+                # Store stream as temporary file for PyPDFLoader
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
@@ -69,78 +100,90 @@ if uploaded_files and gemini_api_key:
                 all_pages.extend(pages)
                 os.remove(tmp_file_path)
 
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            splits = text_splitter.split_documents(all_pages)
+            # Recursive Chunking for optimized context window management
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+            document_splits = text_splitter.split_documents(all_pages)
 
-            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-            vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-            st.session_state.vectorstore = vectorstore
-            st.success(f"Processed {len(uploaded_files)} documents!")
+            # Generate Embeddings & Vector Store
+            try:
+                embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+                vectorstore = Chroma.from_documents(documents=document_splits, embedding=embeddings)
+                st.session_state.vectorstore = vectorstore
+                st.success(f"✅ Successfully indexed {len(uploaded_files)} documents!")
+            except Exception as e:
+                st.error(f"Failed to generate embeddings: {str(e)}")
 
-# Chat Interface
+# ---------------------------------------------------------
+# 5. CHAT INTERFACE & RAG INFERENCE
+# ---------------------------------------------------------
 st.divider()
 
-# Display chat history
+# Rendering Conversation History
 for message in st.session_state.chat_history:
-    role = "user" if message.__class__.__name__ == "HumanMessage" else "assistant"
+    role = "user" if isinstance(message, HumanMessage) else "assistant"
     with st.chat_message(role):
         st.markdown(message.content)
 
-# Chat input
-if prompt := st.chat_input("Ask something..."):
+# Handling User Query
+if prompt := st.chat_input("Query your knowledge base..."):
     if not gemini_api_key:
-        st.error("Missing API Key.")
+        st.error("Authentication Error: Please provide a valid API Key in the sidebar.")
     elif not st.session_state.vectorstore:
-        st.error("Upload documents first.")
+        st.error("Data Error: Please build the knowledge base before chatting.")
     else:
+        # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Setup Modern RAG Chain (via Classic Paths)
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
-        retriever = st.session_state.vectorstore.as_retriever()
+        # Initialize Inference Engines
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
+        retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 5})
 
-        # 1. Contextualize question
-        contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question "
-            "which might reference context in the chat history, "
+        # --- A. HISTORY-AWARE RETRIEVAL ---
+        # Goal: Reformulate user query into a standalone query based on conversation history
+        contextualize_q_system_pt = (
+            "Given a chat history and the latest user query "
             "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed."
+            "independently of the history. Do NOT answer the question."
         )
         contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", contextualize_q_system_prompt),
+            ("system", contextualize_q_system_pt),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ])
-        history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+        history_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-        # 2. Answer question
-        system_prompt = (
-            "You are an expert study assistant. Use the following retrieved context "
-            "to answer the question. If you don't know the answer, say you don't know. "
-            "Use three sentences maximum and keep the answer concise.\n\n"
-            "{context}"
+        # --- B. QUESTION ANSWERING CHAIN ---
+        # Goal: Synthesize answer using retrieved context and conversation history
+        qa_system_prompt = (
+            "You are a professional AI study assistant. Answer the question using ONLY the provided context. "
+            "If the context doesn't contain the answer, state that you don't know based on the provided notes. "
+            "Keep answers structured and professional.\n\n"
+            "Context: {context}"
         )
         qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", qa_system_prompt),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ])
-        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+        
+        # Assemble Full RAG Chain
+        doc_chain = create_stuff_documents_chain(llm, qa_prompt)
+        rag_chain = create_retrieval_chain(history_retriever, doc_chain)
 
-        # Generate response
+        # Execute Chain & Display Response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = rag_chain.invoke({"input": prompt, "chat_history": st.session_state.chat_history})
-                st.markdown(response["answer"])
+            with st.spinner("Retrieving relevant context..."):
+                result = rag_chain.invoke({
+                    "input": prompt, 
+                    "chat_history": st.session_state.chat_history
+                })
+                st.markdown(result["answer"])
                 
-                # Update history
-                from langchain_core.messages import HumanMessage, AIMessage
+                # Update Session History
                 st.session_state.chat_history.extend([
                     HumanMessage(content=prompt),
-                    AIMessage(content=response["answer"]),
+                    AIMessage(content=result["answer"]),
                 ])
 
-st.sidebar.caption("v2.5 (Cloud Optimized) | Built with Streamlit & LangChain Classic")
+st.sidebar.caption("Enterprise RAG v2.6 | Optimized for Python 3.12")
