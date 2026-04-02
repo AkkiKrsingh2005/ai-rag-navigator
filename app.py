@@ -5,8 +5,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_chroma import Chroma
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
 
 # Set up page config
@@ -22,10 +23,16 @@ st.markdown("""
 # Sidebar for configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-    api_key = st.text_input("Enter your Google Gemini API Key:", type="password")
-    if api_key:
-        os.environ["GOOGLE_API_KEY"] = api_key
-        st.success("API Key updated!")
+    # Priority: Streamlit Secrets > Sidebar Input
+    gemini_api_key = st.secrets.get("GOOGLE_API_KEY") if "GOOGLE_API_KEY" in st.secrets else None
+    
+    if not gemini_api_key:
+        gemini_api_key = st.text_input("Enter your Google Gemini API Key:", type="password")
+    else:
+        st.success("API Key loaded from Secrets!")
+
+    if gemini_api_key:
+        os.environ["GOOGLE_API_KEY"] = gemini_api_key
     else:
         st.warning("Please enter your API Key to continue.")
     
@@ -33,21 +40,20 @@ with st.sidebar:
     st.markdown("""
         ### How it works:
         1. **Upload** your PDF documents.
-        2. **Process** the documents into small chunks.
-        3. **Embed** them in a local vector database.
-        4. **Chat** with your notes using AI!
+        2. **Process** documents into segments.
+        3. **Chat** with AI using the context from your notes.
     """)
 
-# Initialize session state for chat and vectorstore
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Initialize session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
 # File uploader
 uploaded_files = st.file_uploader("Choose your study materials (PDFs)", type="pdf", accept_multiple_files=True)
 
-if uploaded_files and api_key:
+if uploaded_files and gemini_api_key:
     if st.button("🚀 Process Documents"):
         with st.spinner("Processing documents..."):
             all_pages = []
@@ -61,65 +67,78 @@ if uploaded_files and api_key:
                 all_pages.extend(pages)
                 os.remove(tmp_file_path)
 
-            # Split text into chunks
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             splits = text_splitter.split_documents(all_pages)
 
-            # Create embeddings and vectorstore
             embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
             vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-            
             st.session_state.vectorstore = vectorstore
-            st.success(f"Successfully processed {len(uploaded_files)} documents into {len(splits)} segments!")
+            st.success(f"Processed {len(uploaded_files)} documents!")
 
 # Chat Interface
 st.divider()
-st.subheader("💬 Chat")
 
 # Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+for message in st.session_state.chat_history:
+    role = "user" if message.__class__.__name__ == "HumanMessage" else "assistant"
+    with st.chat_message(role):
+        st.markdown(message.content)
 
 # Chat input
-if prompt := st.chat_input("Ask something about your notes..."):
-    if not api_key:
-        st.error("Please enter your API key in the sidebar.")
+if prompt := st.chat_input("Ask something..."):
+    if not gemini_api_key:
+        st.error("Missing API Key.")
     elif not st.session_state.vectorstore:
-        st.error("Please upload and process some documents first.")
+        st.error("Upload documents first.")
     else:
-        # Add user message to history
-        st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate AI response
+        # Setup Modern RAG Chain
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+        retriever = st.session_state.vectorstore.as_retriever()
+
+        # 1. Contextualize question (Chat History Aware)
+        contextualize_q_system_prompt = (
+            "Given a chat history and the latest user question "
+            "which might reference context in the chat history, "
+            "formulate a standalone question which can be understood "
+            "without the chat history. Do NOT answer the question, "
+            "just reformulate it if needed and otherwise return it as is."
+        )
+        contextualize_q_prompt = ChatPromptTemplate.from_messages([
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+
+        # 2. Answer question
+        system_prompt = (
+            "You are an expert study assistant. Use the following retrieved context "
+            "to answer the question. If you don't know the answer, say you don't know. "
+            "Use three sentences maximum and keep the answer concise.\n\n"
+            "{context}"
+        )
+        qa_prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+        # Generate response
         with st.chat_message("assistant"):
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
-            
-            # Setup Retrieval Chain
-            qa_chain = ConversationalRetrievalChain.from_llm(
-                llm,
-                retriever=st.session_state.vectorstore.as_retriever(),
-                return_source_documents=True
-            )
-            
-            # Prepare chat history for LangChain
-            chat_history = [(m["content"], "") for m in st.session_state.messages if m["role"] == "user"]
-            
             with st.spinner("Thinking..."):
-                result = qa_chain({"question": prompt, "chat_history": []}) 
-                response = result["answer"]
-                st.markdown(response)
+                response = rag_chain.invoke({"input": prompt, "chat_history": st.session_state.chat_history})
+                st.markdown(response["answer"])
                 
-                # Show sources (optional)
-                with st.expander("Show Sources"):
-                    for doc in result["source_documents"][:3]:
-                        st.write(f"- {doc.metadata.get('source', 'Unknown')} (Page {doc.metadata.get('page', '?')})")
-                        st.caption(doc.page_content[:200] + "...")
+                # Update history
+                from langchain_core.messages import HumanMessage, AIMessage
+                st.session_state.chat_history.extend([
+                    HumanMessage(content=prompt),
+                    AIMessage(content=response["answer"]),
+                ])
 
-            # Add assistant response to history
-            st.session_state.messages.append({"role": "assistant", "content": response})
-
-# Visual polish
-st.sidebar.caption("v1.0 | Built with Streamlit & LangChain")
+st.sidebar.caption("v2.0 (Modern LCEL) | Built with Streamlit & LangChain")
